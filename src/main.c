@@ -50,19 +50,20 @@ static void help(void)
 		"  -h --help\t\t\tPrint this help message\n"
 		"  -V --version\t\t\tPrint the version number\n"
 		"  -v --verbose\t\t\tPrint verbose debug statements\n"
-		"  -l --list\t\t\tList the currently attached DFU capable USB devices\n");
-	printf(	"  -e --detach\t\t\tDetach the currently attached DFU capable USB devices\n"
-		"  -d --device vendor:product\tSpecify Vendor/Product ID of DFU device\n"
-		"  -p --path bus-port. ... .port\tSpecify path to DFU device\n"
-		"  -c --cfg config_nr\t\tSpecify the Configuration of DFU device\n"
-		"  -i --intf intf_nr\t\tSpecify the DFU Interface number\n"
-		"  -a --alt alt\t\t\tSpecify the Altsetting of the DFU Interface\n"
+		"  -l --list\t\t\tList currently attached DFU capable devices\n");
+	printf(	"  -e --detach\t\t\tDetach currently attached DFU capable devices\n"
+		"  -d --device <vendor:product>\tSpecify Vendor/Product ID of DFU device\n"
+		"  -p --path <bus-port. ... .port>\tSpecify path to DFU device\n"
+		"  -c --cfg <config_nr>\t\tSpecify the Configuration of DFU device\n"
+		"  -i --intf <intf_nr>\t\tSpecify the DFU Interface number\n"
+		"  -a --alt <alt>\t\tSpecify the Altsetting of the DFU Interface\n"
 		"\t\t\t\tby name or by number\n");
-	printf(	"  -t --transfer-size\t\tSpecify the number of bytes per USB Transfer\n"
-		"  -U --upload file\t\tRead firmware from device into <file>\n"
-		"  -D --download file\t\tWrite firmware from <file> into device\n"
+	printf(	"  -t --transfer-size <size>\tSpecify the number of bytes per USB Transfer\n"
+		"  -U --upload <file>\t\tRead firmware from device into <file>\n"
+		"  -D --download <file>\t\tWrite firmware from <file> into device\n"
 		"  -R --reset\t\t\tIssue USB Reset signalling once we're finished\n"
-		"  -s --dfuse-address address\tST DfuSe mode, specify target address for\n"
+		"  -I --ignore-suffix\t\tDownload <file> even if suffix doesn't match\n"
+		"  -s --dfuse-address <address>\tST DfuSe mode, specify target address for\n"
 		"\t\t\t\traw file download or upload. Not applicable for\n"
 		"\t\t\t\tDfuSe file (.dfu) downloads\n"
 		);
@@ -95,7 +96,8 @@ static struct option opts[] = {
 	{ "upload", 1, 0, 'U' },
 	{ "download", 1, 0, 'D' },
 	{ "reset", 0, 0, 'R' },
-	{ "dfuse-address", 1, 0, 's' }
+	{ "dfuse-address", 1, 0, 's' },
+	{ "ignore-suffix", 0, 0, 'I' }
 };
 
 int main(int argc, char **argv)
@@ -106,7 +108,7 @@ int main(int argc, char **argv)
 	unsigned int transfer_size = 0;
 	enum mode mode = MODE_NONE;
 	struct dfu_status status;
-	struct usb_dfu_func_descriptor func_dfu = {0}, func_dfu_rt = {0};
+	struct usb_dfu_func_descriptor func_dfu = {0, 0, 0, 0, 0, 0}, func_dfu_rt = {0, 0, 0, 0, 0, 0};
 	libusb_context *ctx;
 	struct libusb_device_descriptor desc;
 	struct dfu_file file;
@@ -115,6 +117,7 @@ int main(int argc, char **argv)
 	unsigned char active_alt_name[MAX_DESC_STR_LEN+1];
 	char *end;
 	int final_reset = 0;
+	int ignore_suffix = 0;
 	int ret;
 	int dfuse_device = 0;
 	const char *dfuse_options = NULL;
@@ -124,7 +127,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int c, option_index = 0;
-		c = getopt_long(argc, argv, "hVvled:p:c:i:a:t:U:D:Rs:", opts,
+		c = getopt_long(argc, argv, "hVvled:p:c:i:a:t:U:D:RIs:", opts,
 				&option_index);
 		if (c == -1)
 			break;
@@ -194,6 +197,9 @@ int main(int argc, char **argv)
 			break;
 		case 'R':
 			final_reset = 1;
+			break;
+		case 'I':
+			ignore_suffix = 1;
 			break;
 		case 's':
 			dfuse_options = optarg;
@@ -633,6 +639,7 @@ status_again:
 			exit(1);
 		if (ret == 0) {
 			fprintf(stderr, "Warning: File has no DFU suffix\n");
+			ret = -1;
 		} else if (file.bcdDFU != 0x0100 && file.bcdDFU != 0x11a) {
 			fprintf(stderr, "Unsupported DFU file revision "
 				"%04x\n", file.bcdDFU);
@@ -642,20 +649,24 @@ status_again:
 		    dif->vendor != file.idVendor) {
 			fprintf(stderr, "Warning: File vendor ID %04x does "
 				"not match device %04x\n", file.idVendor, dif->vendor);
+			ret = -1;
 		}
 		if (file.idProduct != 0xffff &&
 		    dif->product != file.idProduct) {
 			fprintf(stderr, "Warning: File product ID %04x does "
 				"not match device %04x\n", file.idProduct, dif->product);
+			ret = -1;
 		}
-		if (dfuse_device || dfuse_options || file.bcdDFU == 0x11a) {
-		        if (dfuse_do_dnload(dif, transfer_size, file,
-							dfuse_options) < 0)
-				exit(1);
-		} else {
-			if (dfuload_do_dnload(dif, transfer_size, file) < 0)
-				exit(1);
-	 	}
+		if (ret > 0 || ignore_suffix == 1) {
+			if (dfuse_device || dfuse_options || file.bcdDFU == 0x11a) {
+					if (dfuse_do_dnload(dif, transfer_size, file,
+								dfuse_options) < 0)
+					exit(1);
+			} else {
+				if (dfuload_do_dnload(dif, transfer_size, file) < 0)
+					exit(1);
+			}
+		}
 		fclose(file.filep);
 		break;
 	default:
