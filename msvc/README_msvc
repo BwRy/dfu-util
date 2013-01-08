@@ -1,0 +1,17 @@
+# (C) Roger Meier <r.meier@siemens.com>
+# (C) Pascal Schweizer <pascal.schweizer@siemens.com>
+# msvc folder is GPL-2.0+, LGPL-2.1+, BSD-3-Clause or MIT license(SPDX)
+
+Building dfu-util native on Windows with Visual Studio
+
+Folder structure
+3rdparty
+- dfu-util ( yes, you are reading dfu-util/msvc/README_msvc )
+- libusbx ( git clone https://github.com/libusbx/libusbx.git )
+  - getopt (part of libusbx: libusbx/examples/getopt)
+
+TODO
+- how to fix PACKAGE_STRING and PACKAGE_BUGREPORT hack within portable.h ?
+- create dedicated projects
+  - dfu-util (dll)
+- request relicensing of dfu-util to LGPL (use dfu-util.dll with a proprietary app)

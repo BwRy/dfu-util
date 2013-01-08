@@ -4,11 +4,18 @@
 
 #ifdef HAVE_CONFIG_H
 # include "config.h"
+#else
+# define PACKAGE "dfu-util"
+# define PACKAGE_VERSION "0.7-msvc"
+# define PACKAGE_STRING "dfu-util 0.7-msvc"
+# define PACKAGE_BUGREPORT "dfu-util@lists.gnumonks.org"
 #endif
 
 #ifdef HAVE_FTRUNCATE
 # include <unistd.h>
-#endif
+#else
+# include <io.h>
+#endif /* HAVE_FTRUNCATE */
 
 #ifdef HAVE_USLEEP
 # include <unistd.h>

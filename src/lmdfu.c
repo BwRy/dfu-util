@@ -108,8 +108,6 @@ int lmdfu_add_prefix(struct dfu_file file, unsigned int address)
 int lmdfu_remove_prefix(struct dfu_file *file)
 {
 	int ret = -1;
-
-#ifdef HAVE_FTRUNCATE
 	long len;
 	unsigned char *data;
 
@@ -137,8 +135,12 @@ int lmdfu_remove_prefix(struct dfu_file *file)
 		return -EIO;
 	}
 
+#ifdef HAVE_FTRUNCATE
 	ret = ftruncate(fileno(file->filep), 0);
-	if (ret < 0) {
+#else
+	ret = _chsize_s(_fileno(file->filep), 0);
+#endif /* HAVE_FTRUNCATE */
+	if (ret != 0) {
 		fprintf(stderr, "Error truncating\n");
 	}
 	rewind(file->filep);
@@ -147,9 +149,6 @@ int lmdfu_remove_prefix(struct dfu_file *file)
 	       file->filep);
 
 	printf("TI Stellaris prefix removed\n");
-#else
-	printf("Prefix removal not implemented on this platform\n");
-#endif /* HAVE_FTRUNCATE */
 
 	return ret;
 }
@@ -182,5 +181,6 @@ int lmdfu_check_prefix(struct dfu_file *file)
 
 out_rewind:
 	rewind(file->filep);
+	free(data);
 	return ret;
 }

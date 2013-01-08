@@ -107,17 +107,17 @@ static int remove_suffix(struct dfu_file *file)
 		return 0;
 
 #ifdef HAVE_FTRUNCATE
-	/* There is no easy way to truncate to a size with stdio */
 	ret = ftruncate(fileno(file->filep),
 			(long) file->size - file->suffixlen);
-	if (ret < 0) {
-		perror("ftruncate");
+#else
+	ret = _chsize_s(_fileno(file->filep),
+			(long) file->size - file->suffixlen);
+#endif /* HAVE_FTRUNCATE */
+	if (ret != 0) {
+		fprintf(stderr, "Error truncating\n");
 		exit(1);
 	}
 	printf("DFU suffix removed\n");
-#else
-	printf("Suffix removal not implemented on this platform\n");
-#endif /* HAVE_FTRUNCATE */
 	return 1;
 }
 
