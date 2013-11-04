@@ -23,17 +23,15 @@
 #include <string.h>
 #include <errno.h>
 
+#include "portable.h"
+#include "dfu_file.h"
 #include "dfuse_mem.h"
-
-extern int verbose;
 
 int add_segment(struct memsegment **segment_list, struct memsegment segment)
 {
 	struct memsegment *new_element;
 
-	new_element = malloc(sizeof(struct memsegment));
-	if (!new_element)
-		return -ENOMEM;
+	new_element = dfu_malloc(sizeof(struct memsegment));
 	*new_element = segment;
 	new_element->next = NULL;
 
@@ -93,27 +91,20 @@ struct memsegment *parse_memory_layout(char *intf_desc)
 	struct memsegment *segment_list = NULL;
 	struct memsegment segment;
 
-	name = malloc(strlen(intf_desc));
-	if (!name) {
-		fprintf(stderr, "Error: Cannot allocate memory\n");
-		exit(1);
-	}
+	name = dfu_malloc(strlen(intf_desc));
+
 	ret = sscanf(intf_desc, "@%[^/]%n", name, &scanned);
 	if (ret < 1) {
-		fprintf(stderr, "Error: Could not read name, sscanf returned "
-			"%d\n", ret);
+		errx(EX_IOERR, "Could not read name, sscanf returned "
+			"%d", ret);
 		free(name);
 		return NULL;
 	}
 	printf("DfuSe interface name: \"%s\"\n", name);
-	free(name);
 
 	intf_desc += scanned;
-	typestring = malloc(strlen(intf_desc));
-	if (!typestring) {
-		fprintf(stderr, "Error: Cannot allocate memory\n");
-		exit(1);
-	}
+	typestring = dfu_malloc(strlen(intf_desc));
+
 	while (ret = sscanf(intf_desc, "/0x%x/%n", &address, &scanned),
 	       ret > 0) {
 
@@ -130,13 +121,16 @@ struct memsegment *parse_memory_layout(char *intf_desc)
 				    && typestring[0] != '/')
 					memtype = typestring[0];
 				else {
-					fprintf(stderr,
-						"Parsing type identifier '%s' "
-						"failed for segment %i\n",
+					errx(EX_IOERR, "Parsing type identifier '%s' "
+						"failed for segment %i",
 						typestring, count);
 					continue;
 				}
 			}
+
+			/* Quirk for STM32F4 devices */
+			if (strcmp(name, "Device Feature") == 0)
+				memtype = 'e';
 
 			switch (multiplier) {
 			case 'B':
@@ -155,24 +149,21 @@ struct memsegment *parse_memory_layout(char *intf_desc)
 			case 'f':
 			case 'g':
 				if (!memtype) {
-					fprintf(stderr,
-						"Non-valid multiplier '%c', "
+					errx(EX_IOERR, "Non-valid multiplier '%c', "
 						"interpreted as type "
-						"identifier instead\n",
+						"identifier instead",
 						multiplier);
 					memtype = multiplier;
 					break;
 				}
 				/* fallthrough if memtype was already set */
 			default:
-				fprintf(stderr,
-					"Non-valid multiplier '%c', "
-					"assuming bytes\n", multiplier);
+				errx(EX_IOERR, "Non-valid multiplier '%c', "
+					"assuming bytes", multiplier);
 			}
 
 			if (!memtype) {
-				fprintf(stderr,
-					"No valid type for segment %d\n\n",
+				errx(EX_IOERR, "No valid type for segment %d\n",
 					count);
 				continue;
 			}
@@ -201,6 +192,7 @@ struct memsegment *parse_memory_layout(char *intf_desc)
 		}	/* while per segment */
 
 	}		/* while per address */
+	free(name);
 	free(typestring);
 
 	return segment_list;

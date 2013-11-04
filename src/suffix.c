@@ -1,5 +1,6 @@
 /*
  * (C) 2011 - 2012 Stefan Schmidt <stefan@datenfreihafen.org>
+ * (C) 2013 Hans Petter Selasky <hps@bitfrost.no>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,9 +23,15 @@
 #include <getopt.h>
 #include <string.h>
 
+#include "portable.h"
 #include "dfu_file.h"
 #include "lmdfu.h"
-#include "portable.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+#ifdef HAVE_FTRUNCATE
+# include <unistd.h>
+#endif
 
 enum mode {
 	MODE_NONE,
@@ -33,30 +40,31 @@ enum mode {
 	MODE_CHECK
 };
 
-enum lmdfu_mode {
-	LMDFU_NONE,
-	LMDFU_ADD,
-	LMDFU_DEL,
-	LMDFU_CHECK
-};
+static uint8_t dfu_has_suffix;
+static uint8_t dfu_has_prefix;
+static uint8_t dfu_want_suffix;
+static uint8_t dfu_want_prefix;
+
+int verbose;
 
 static void help(void)
 {
-	printf("Usage: dfu-suffix [options] ...\n"
-		"  -h --help\t\t\tPrint this help message\n"
-		"  -V --version\t\t\tPrint the version number\n"
-		"  -c --check <file>\t\tCheck DFU suffix of <file>\n"
-		"  -a --add <file>\t\tAdd DFU suffix to <file>\n"
-		"  -D --delete <file>\t\tDelete DFU suffix from <file>\n"
-		"  -p --pid <productID>\t\tAdd product ID into DFU suffix in <file>\n"
-		"  -v --vid <vendorID>\t\tAdd vendor ID into DFU suffix in <file>\n"
-		"  -d --did <deviceID>\t\tAdd device ID into DFU suffix in <file>\n"
+	printf("Usage: dfu-suffix [options] <file>\n"
+		"  -h --help\tPrint this help message\n"
+		"  -V --version\tPrint the version number\n"
+		"  -D --delete\tDelete DFU suffix from <file>\n"
+		"  -p --pid\tAdd product ID into DFU suffix in <file>\n"
+		"  -v --vid\tAdd vendor ID into DFU suffix in <file>\n"
+		"  -d --did\tAdd device ID into DFU suffix in <file>\n"
+		"  -c --check\tCheck DFU suffix of <file>\n"
+		"  -a --add\tAdd DFU suffix to <file>\n"
 		);
-	printf( "  -s --stellaris-address <address>  Add TI Stellaris address prefix to <file>,\n\t\t\t\t"
-		"to be used in combination with -a\n"
-		"  -T --stellaris\t\tAct on TI Stellaris address prefix of <file>, \n\t\t\t\t"
-		"to be used in combination with -D or -c\n"
+	printf( "  -s --stellaris-address <address>  Add TI Stellaris address "
+		"prefix to <file>,\n\t\tto be used together with -a\n"
+		"  -T --stellaris  Act on TI Stellaris extension prefix of "
+		"<file>, to be used\n\t\tin combination with -D or -c\n"
 		);
+	exit(EX_USAGE);
 }
 
 static void print_version(void)
@@ -81,17 +89,19 @@ static struct option opts[] = {
 	{ "stellaris", 0, 0, 'T' },
 };
 
-static int check_suffix(struct dfu_file *file) {
-	int ret;
-
-	ret = parse_dfu_suffix(file);
-	if (ret > 0) {
+static void show_suffix_and_prefix(struct dfu_file *file)
+{
+	if (file->size.prefix > 0) {
+		printf("The file %s contains a DFU prefix with the following properties:\n", file->name);
+		printf("Address:\t0x%08x\n", file->lmdfu_address);
+	}
+	if (file->size.suffix > 0) {
 		printf("The file %s contains a DFU suffix with the following properties:\n", file->name);
 		printf("BCD device:\t0x%04X\n", file->bcdDevice);
 		printf("Product ID:\t0x%04X\n",file->idProduct);
 		printf("Vendor ID:\t0x%04X\n", file->idVendor);
 		printf("BCD DFU:\t0x%04X\n", file->bcdDFU);
-		printf("Length:\t\t%i\n", file->suffixlen);
+		printf("Length:\t\t%i\n", file->size.suffix);
 		printf("CRC:\t\t0x%08X\n", file->dwCRC);
 	}
 
@@ -107,17 +117,17 @@ static int remove_suffix(struct dfu_file *file)
 		return 0;
 
 #ifdef HAVE_FTRUNCATE
+	/* There is no easy way to truncate to a size with stdio */
 	ret = ftruncate(fileno(file->filep),
 			(long) file->size - file->suffixlen);
-#else
-	ret = _chsize_s(_fileno(file->filep),
-			(long) file->size - file->suffixlen);
-#endif /* HAVE_FTRUNCATE */
-	if (ret != 0) {
-		fprintf(stderr, "Error truncating\n");
+	if (ret < 0) {
+		perror("ftruncate");
 		exit(1);
 	}
 	printf("DFU suffix removed\n");
+#else
+	printf("Suffix removal not implemented on this platform\n");
+#endif /* HAVE_FTRUNCATE */
 	return 1;
 }
 
@@ -141,15 +151,16 @@ int main(int argc, char **argv)
 	struct dfu_file file;
 	int pid, vid, did;
 	enum mode mode = MODE_NONE;
-	enum lmdfu_mode lmdfu_mode = LMDFU_NONE;
-	unsigned int lmdfu_flash_address=0;
-	int lmdfu_prefix=0;
+	uint32_t lmdfu_flash_address = 0;
 	char *end;
+
+	/* make sure all prints are flushed */
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	print_version();
 
 	pid = vid = did = 0xffff;
-	file.name = NULL;
+        memset(&file, 0, sizeof(file));
 
 	while (1) {
 		int c, option_index = 0;
@@ -161,111 +172,90 @@ int main(int argc, char **argv)
 		switch (c) {
 		case 'h':
 			help();
-			exit(0);
 			break;
 		case 'V':
 			exit(0);
 			break;
 		case 'D':
+			dfu_has_suffix = 1;
 			file.name = optarg;
 			mode = MODE_DEL;
 			break;
 		case 'p':
+			dfu_want_suffix = 1;
 			pid = strtol(optarg, NULL, 16);
 			break;
 		case 'v':
+			dfu_want_suffix = 1;
 			vid = strtol(optarg, NULL, 16);
 			break;
 		case 'd':
+			dfu_want_suffix = 1;
 			did = strtol(optarg, NULL, 16);
 			break;
 		case 'c':
+			dfu_has_suffix = 1;
 			file.name = optarg;
 			mode = MODE_CHECK;
 			break;
 		case 'a':
+			dfu_want_suffix = 1;
 			file.name = optarg;
 			mode = MODE_ADD;
 			break;
 		case 's':
-			lmdfu_mode = LMDFU_ADD;
+			dfu_want_prefix = 1;
 			lmdfu_flash_address = strtoul(optarg, &end, 0);
 			if (*end) {
-				fprintf(stderr, "Error: Invalid lmdfu "
-					"address: %s\n", optarg);
-				exit(2);
+				errx(EX_IOERR, "Invalid lmdfu "
+					"address: %s", optarg);
 			}
 			break;
 		case 'T':
-			lmdfu_mode = LMDFU_CHECK; /* or LMDFU_DEL */
+			dfu_has_prefix = 1;
 			break;
 		default:
 			help();
-			exit(2);
+			break;
 		}
 	}
-
-	if(mode == MODE_DEL && lmdfu_mode == LMDFU_CHECK)
-		lmdfu_mode = LMDFU_DEL;
 
 	if (!file.name) {
 		fprintf(stderr, "You need to specify a filename\n");
 		help();
-		exit(2);
-	}
-
-	if (mode != MODE_NONE) {
-		file.filep = fopen(file.name, "r+b");
-		if (file.filep == NULL) {
-			perror(file.name);
-			exit(1);
-		}
 	}
 
 	switch(mode) {
 	case MODE_ADD:
-		if (check_suffix(&file)) {
-			if(lmdfu_prefix) lmdfu_check_prefix(&file);
-			printf("Please remove existing DFU suffix before adding a new one.\n");
-			exit(1);
-		}
-		if(lmdfu_mode == LMDFU_ADD) {
-			if(lmdfu_check_prefix(&file)) {
-				fprintf(stderr, "Adding new anyway\n");
-			}
-			lmdfu_add_prefix(file, lmdfu_flash_address);
-		}
-		add_suffix(&file, pid, vid, did);
+		dfu_load_file(&file, dfu_has_suffix, dfu_has_prefix);
+		file.lmdfu_address = lmdfu_flash_address;
+		file.idVendor = vid;
+		file.idProduct = pid;
+		file.bcdDevice = did;
+		dfu_store_file(&file, dfu_want_suffix, dfu_want_prefix);
+		if (dfu_want_prefix)
+			printf("Prefix successfully added to file\n");
+		if (dfu_want_suffix)
+			printf("Suffix successfully added to file\n");
 		break;
+
 	case MODE_CHECK:
-		/* FIXME: could open read-only here */
-		check_suffix(&file);
-		if(lmdfu_mode == LMDFU_CHECK)
-			lmdfu_check_prefix(&file);
+		dfu_load_file(&file, dfu_has_suffix, dfu_has_prefix);
+		show_suffix_and_prefix(&file);
 		break;
+
 	case MODE_DEL:
-		if(!remove_suffix(&file)) {
-			if(lmdfu_mode == LMDFU_DEL)
-				if (lmdfu_check_prefix(&file))
-					lmdfu_remove_prefix(&file);
-			exit(1);
-		}
+		dfu_load_file(&file, dfu_has_suffix, dfu_has_prefix);
+		dfu_store_file(&file, 0, 0);
+		if (dfu_has_prefix)
+			printf("Prefix successfully removed from file\n");
+		if (dfu_has_suffix)
+			printf("Suffix successfully removed from file\n");
 		break;
+
 	default:
 		help();
-		exit(2);
+		break;
 	}
-
-	if(lmdfu_mode == LMDFU_DEL) {
-		if (check_suffix(&file)) {
-			fprintf(stderr, "DFU suffix exist. Remove suffix before using -T or use it with -D to delete suffix\n");
-			exit(1);
-		} else {
-			if(lmdfu_check_prefix(&file))
-				lmdfu_remove_prefix(&file);
-		}
-	}
-
-	fclose(file.filep);
-	exit(0);
+	return (0);
 }

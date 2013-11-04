@@ -38,371 +38,28 @@
 #include <usbpath.h>
 #endif
 
-extern int verbose;
-
-/* Find DFU interfaces in a given device.
- * Iterate through all DFU interfaces and their alternate settings
- * and call the passed handler function on each setting until handler
- * returns non-zero. */
-int find_dfu_if(libusb_device *dev,
-		       int (*handler)(struct dfu_if *, void *),
-		       void *v)
-{
-	struct libusb_device_descriptor desc;
-	struct libusb_config_descriptor *cfg;
-	const struct libusb_interface_descriptor *intf;
-	const struct libusb_interface *uif;
-	struct dfu_if _dif, *dfu_if = &_dif;
-	int cfg_idx, intf_idx, alt_idx;
-	int rc;
-
-	memset(dfu_if, 0, sizeof(*dfu_if));
-	rc = libusb_get_device_descriptor(dev, &desc);
-	if (rc)
-		return rc;
-	for (cfg_idx = 0; cfg_idx < desc.bNumConfigurations;
-	     cfg_idx++) {
-		rc = libusb_get_config_descriptor(dev, cfg_idx, &cfg);
-		if (rc)
-			return rc;
-		/* in some cases, noticably FreeBSD if uid != 0,
-		 * the configuration descriptors are empty */
-		if (!cfg)
-			return 0;
-		for (intf_idx = 0; intf_idx < cfg->bNumInterfaces;
-		     intf_idx++) {
-			uif = &cfg->interface[intf_idx];
-			if (!uif)
-				return 0;
-			for (alt_idx = 0;
-			     alt_idx < uif->num_altsetting; alt_idx++) {
-				intf = &uif->altsetting[alt_idx];
-				if (!intf)
-					return 0;
-				if (intf->bInterfaceClass == 0xfe &&
-				    intf->bInterfaceSubClass == 1) {
-					dfu_if->dev = dev;
-					dfu_if->vendor = desc.idVendor;
-					dfu_if->product = desc.idProduct;
-					dfu_if->bcdDevice = desc.bcdDevice;
-					dfu_if->configuration = cfg->
-							bConfigurationValue;
-					dfu_if->interface =
-						intf->bInterfaceNumber;
-					dfu_if->altsetting =
-						intf->bAlternateSetting;
-					if (intf->bInterfaceProtocol == 2)
-						dfu_if->flags |= DFU_IFF_DFU;
-					else
-						dfu_if->flags &= ~DFU_IFF_DFU;
-					if (!handler)
-						return 1;
-					rc = handler(dfu_if, v);
-					if (rc != 0)
-						return rc;
-				}
-			}
-		}
-
-		libusb_free_config_descriptor(cfg);
-	}
-
-	return 0;
-}
-
-int _get_first_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	/* Copy everything except the device handle.
-	 * This depends heavily on this member being last! */
-	memcpy(v_dif, dif, sizeof(*v_dif)-sizeof(libusb_device_handle *));
-
-	/* return a value that makes find_dfu_if return immediately */
-	return 1;
-}
-
-/* Fills in dif with the first found DFU interface */
-int get_first_dfu_if(struct dfu_if *dif)
-{
-	return find_dfu_if(dif->dev, &_get_first_cb, (void *) dif);
-}
-
-int _check_match_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	if (v_dif->flags & DFU_IFF_IFACE &&
-	    dif->interface != v_dif->interface)
-		return 0;
-	if (v_dif->flags & DFU_IFF_ALT &&
-	    dif->altsetting != v_dif->altsetting)
-		return 0;
-	return _get_first_cb(dif, v);
-}
-
-/* Fills in dif from the matching DFU interface/altsetting */
-int get_matching_dfu_if(struct dfu_if *dif)
-{
-	return find_dfu_if(dif->dev, &_check_match_cb, (void *) dif);
-}
-
-int _count_match_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	if (v_dif->flags & DFU_IFF_IFACE &&
-	    dif->interface != v_dif->interface)
-		return 0;
-	if (v_dif->flags & DFU_IFF_ALT &&
-	    dif->altsetting != v_dif->altsetting)
-		return 0;
-	v_dif->count++;
-	return 0;
-}
-
-/* Count matching DFU interface/altsetting */
-int count_matching_dfu_if(struct dfu_if *dif)
-{
-	dif->count = 0;
-	find_dfu_if(dif->dev, &_count_match_cb, (void *) dif);
-	return dif->count;
-}
-
-/* Retrieves alternate interface name string.
- * Returns string length, or negative on error */
-int get_alt_name(struct dfu_if *dfu_if, unsigned char *name)
-{
-	libusb_device *dev = dfu_if->dev;
-	struct libusb_config_descriptor *cfg;
-	int alt_name_str_idx;
-	int ret;
-
-	ret = libusb_get_config_descriptor_by_value(dev, dfu_if->configuration,
-						    &cfg);
-	if (ret)
-		return ret;
-
-	alt_name_str_idx = cfg->interface[dfu_if->interface].
-			       altsetting[dfu_if->altsetting].iInterface;
-	ret = -1;
-	if (alt_name_str_idx) {
-		if (!dfu_if->dev_handle)
-			if (libusb_open(dfu_if->dev, &dfu_if->dev_handle))
-				dfu_if->dev_handle = NULL;
-		if (dfu_if->dev_handle)
-			ret = libusb_get_string_descriptor_ascii(
-					dfu_if->dev_handle, alt_name_str_idx,
-					name, MAX_DESC_STR_LEN);
-	}
-	libusb_free_config_descriptor(cfg);
-	return ret;
-}
-
-int print_dfu_if(struct dfu_if *dfu_if, void *v)
-{
-	unsigned char name[MAX_DESC_STR_LEN+1] = "UNDEFINED";
-
-	get_alt_name(dfu_if, name);
-
-	printf("Found %s: [%04x:%04x] devnum=%u, cfg=%u, intf=%u, "
-	       "alt=%u, name=\"%s\"\n",
-	       dfu_if->flags & DFU_IFF_DFU ? "DFU" : "Runtime",
-	       dfu_if->vendor, dfu_if->product, dfu_if->devnum,
-	       dfu_if->configuration, dfu_if->interface,
-	       dfu_if->altsetting, name);
-	return 0;
-}
-
-/* Walk the device tree and print out DFU devices */
-int list_dfu_interfaces(libusb_context *ctx)
-{
-	libusb_device **list;
-	libusb_device *dev;
-	ssize_t num_devs, i;
-
-	num_devs = libusb_get_device_list(ctx, &list);
-
-	for (i = 0; i < num_devs; ++i) {
-		dev = list[i];
-		find_dfu_if(dev, &print_dfu_if, NULL);
-	}
-
-	libusb_free_device_list(list, 1);
-	return 0;
-}
-
-int alt_by_name(struct dfu_if *dfu_if, void *v)
-{
-	unsigned char name[MAX_DESC_STR_LEN+1];
-
-	if (get_alt_name(dfu_if, name) < 0)
-		return 0;
-	if (strcmp((char *)name, v))
-		return 0;
-	/*
-	 * Return altsetting+1 so that we can use return value 0 to indicate
-	 * "not found".
-	 */
-	return dfu_if->altsetting+1;
-}
-
-int _count_cb(struct dfu_if *dif, void *v)
-{
-	int *count = (int*) v;
-
-	(*count)++;
-
-	return 0;
-}
-
-/* Count DFU interfaces within a single device */
-int count_dfu_interfaces(libusb_device *dev)
-{
-	int num_found = 0;
-
-	find_dfu_if(dev, &_count_cb, (void *) &num_found);
-
-	return num_found;
-}
-
-
-/* Iterate over all matching DFU capable devices within system */
-int iterate_dfu_devices(libusb_context *ctx, struct dfu_if *dif,
-    int (*action)(struct libusb_device *dev, void *user), void *user)
-{
-	libusb_device **list;
-	ssize_t num_devs, i;
-
-	num_devs = libusb_get_device_list(ctx, &list);
-	for (i = 0; i < num_devs; ++i) {
-		int retval;
-		struct libusb_device_descriptor desc;
-		struct libusb_device *dev = list[i];
-
-		if (dif && (dif->flags & DFU_IFF_DEVNUM) &&
-		    (libusb_get_bus_number(dev) != dif->bus ||
-		     libusb_get_device_address(dev) != dif->devnum))
-			continue;
-		if (libusb_get_device_descriptor(dev, &desc))
-			continue;
-		if (dif && (dif->flags & DFU_IFF_VENDOR) &&
-		    desc.idVendor != dif->vendor)
-			continue;
-		if (dif && (dif->flags & DFU_IFF_PRODUCT) &&
-		    desc.idProduct != dif->product)
-			continue;
-		if (!count_dfu_interfaces(dev))
-			continue;
-
-		retval = action(dev, user);
-		if (retval) {
-			libusb_free_device_list(list, 0);
-			return retval;
-		}
-	}
-	libusb_free_device_list(list, 0);
-	return 0;
-}
-
-
-int found_dfu_device(struct libusb_device *dev, void *user)
-{
-	struct dfu_if *dif = (struct dfu_if*) user;
-
-	dif->dev = dev;
-	return 1;
-}
-
-
-/* Find the first DFU-capable device, save it in dfu_if->dev */
-int get_first_dfu_device(libusb_context *ctx, struct dfu_if *dif)
-{
-	return iterate_dfu_devices(ctx, dif, found_dfu_device, dif);
-}
-
-
-int count_one_dfu_device(struct libusb_device *dev, void *user)
-{
-	int *num = (int*) user;
-
-	(*num)++;
-	return 0;
-}
-
-
-/* Count DFU capable devices within system */
-int count_dfu_devices(libusb_context *ctx, struct dfu_if *dif)
-{
-	int num_found = 0;
-
-	iterate_dfu_devices(ctx, dif, count_one_dfu_device, &num_found);
-	return num_found;
-}
-
-
-void parse_vendprod(uint16_t *vendor, uint16_t *product,
-			   const char *str)
-{
-	const char *colon;
-
-	*vendor = (uint16_t)strtoul(str, NULL, 16);
-	colon = strchr(str, ':');
-	if (colon)
-		*product = (uint16_t)strtoul(colon + 1, NULL, 16);
-	else
-		*product = 0;
-}
-
-
-#ifdef HAVE_USBPATH_H
-
-int resolve_device_path(struct dfu_if *dif)
-{
-	int res;
-
-	res = usb_path2devnum(dif->path);
-	if (res < 0)
-		return -EINVAL;
-	if (!res)
-		return 0;
-
-	dif->bus = atoi(dif->path);
-	dif->devnum = res;
-	dif->flags |= DFU_IFF_DEVNUM;
-	return res;
-}
-
-#else /* HAVE_USBPATH_H */
-
-int resolve_device_path(struct dfu_if *dif)
-{
-	fprintf(stderr,
-	    "USB device paths are not supported by this dfu-util.\n");
-	exit(1);
-}
-
-#endif /* !HAVE_USBPATH_H */
-
-/* Look for a descriptor in a concatenated descriptor list
- * Will return desc_index'th match of given descriptor type
- * Returns length of found descriptor, limited to res_size */
-int find_descriptor(const unsigned char *desc_list, int list_len,
-			   uint8_t desc_type, uint8_t desc_index,
-			   uint8_t *res_buf, int res_size)
+/*
+ * Look for a descriptor in a concatenated descriptor list. Will
+ * return upon the first match of the given descriptor type. Returns length of
+ * found descriptor, limited to res_size
+ */
+static int find_descriptor(const uint8_t *desc_list, int list_len,
+    uint8_t desc_type, void *res_buf, int res_size)
 {
 	int p = 0;
-	int hit = 0;
+
+	if (list_len < 2)
+		return (-1);
 
 	while (p + 1 < list_len) {
 		int desclen;
 
 		desclen = (int) desc_list[p];
 		if (desclen == 0) {
-			fprintf(stderr, "Error: Invalid descriptor list\n");
+			warnx("Invalid descriptor list");
 			return -1;
 		}
-		if (desc_list[p + 1] == desc_type && hit++ == desc_index) {
+		if (desc_list[p + 1] == desc_type) {
 			if (desclen > res_size)
 				desclen = res_size;
 			if (p + desclen > list_len)
@@ -412,111 +69,265 @@ int find_descriptor(const unsigned char *desc_list, int list_len,
 		}
 		p += (int) desc_list[p];
 	}
-	return 0;
+	return -1;
 }
 
-/* Look for a descriptor in the active configuration
- * Will also find extra descriptors which are normally
- * not returned by the standard libusb_get_descriptor() */
-int usb_get_any_descriptor(struct libusb_device_handle *dev_handle,
-				  uint8_t desc_type,
-				  uint8_t desc_index,
-				  unsigned char *resbuf, int res_len)
+static void probe_configuration(libusb_device *dev, struct libusb_device_descriptor *desc)
 {
-	struct libusb_device *dev;
-	struct libusb_config_descriptor *config;
-	int ret;
-	uint16_t conflen;
-	unsigned char *cbuf;
-
-	dev = libusb_get_device(dev_handle);
-	if (!dev) {
-		fprintf(stderr, "Error: Broken device handle\n");
-		return -1;
-	}
-	/* Get the total length of the configuration descriptors */
-	ret = libusb_get_active_config_descriptor(dev, &config);
-	if (ret == LIBUSB_ERROR_NOT_FOUND) {
-		fprintf(stderr, "Error: Device is unconfigured\n");
-		return -1;
-	} else if (ret) {
-		fprintf(stderr, "Error: failed "
-			"libusb_get_active_config_descriptor()\n");
-		exit(1);
-	}
-	conflen = config->wTotalLength;
-	libusb_free_config_descriptor(config);
-
-	/* Suck in the configuration descriptor list from device */
-	cbuf = malloc(conflen);
-	ret = libusb_get_descriptor(dev_handle, LIBUSB_DT_CONFIG,
-				    desc_index, cbuf, conflen);
-	if (ret < conflen) {
-		fprintf(stderr, "Warning: failed to retrieve complete "
-			"configuration descriptor, got %i/%i\n",
-			ret, conflen);
-		conflen = ret;
-	}
-	/* Search through the configuration descriptor list */
-	ret = find_descriptor(cbuf, conflen, desc_type, desc_index,
-			      resbuf, res_len);
-	free(cbuf);
-
-	/* A descriptor must be at least 2 bytes long */
-	if (ret > 1) {
-		if (verbose)
-			printf("Found descriptor in complete configuration "
-			       "descriptor list\n");
-		return ret;
-	}
-
-	/* Finally try to retrieve it requesting the device directly
-	 * This is not supported on all devices for non-standard types */
-	return libusb_get_descriptor(dev_handle, desc_type, desc_index,
-				     resbuf, res_len);
-}
-
-/* Get cached extra descriptor from libusb for an interface
- * Returns length of found descriptor */
-int get_cached_extra_descriptor(struct libusb_device *dev,
-				       uint8_t bConfValue,
-				       uint8_t intf,
-				       uint8_t desc_type, uint8_t desc_index,
-				       unsigned char *resbuf, int res_len)
-{
+	struct usb_dfu_func_descriptor func_dfu;
+	libusb_device_handle *devh;
+	struct dfu_if *pdfu;
 	struct libusb_config_descriptor *cfg;
-	const unsigned char *extra;
-	int extra_len;
+	const struct libusb_interface_descriptor *intf;
+	const struct libusb_interface *uif;
+	char alt_name[MAX_DESC_STR_LEN + 1];
+	char serial_name[MAX_DESC_STR_LEN + 1];
+	int cfg_idx;
+	int intf_idx;
+	int alt_idx;
 	int ret;
-	int alt;
+	int has_dfu;
 
-	ret = libusb_get_config_descriptor_by_value(dev, bConfValue, &cfg);
-	if (ret == LIBUSB_ERROR_NOT_FOUND) {
-		fprintf(stderr, "Error: Device is unconfigured\n");
-		return -1;
-	} else if (ret) {
-		fprintf(stderr, "Error: failed "
-			"libusb_config_descriptor_by_value()\n");
-		exit(1);
+	for (cfg_idx = 0; cfg_idx != desc->bNumConfigurations; cfg_idx++) {
+		memset(&func_dfu, 0, sizeof(func_dfu));
+		has_dfu = 0;
+
+		ret = libusb_get_config_descriptor(dev, cfg_idx, &cfg);
+		if (ret != 0)
+			return;
+		if (match_config_index > -1 && match_config_index != cfg->bConfigurationValue) {
+			libusb_free_config_descriptor(cfg);
+			continue;
+		}
+
+		/*
+		 * In some cases, noticably FreeBSD if uid != 0,
+		 * the configuration descriptors are empty
+		 */
+		if (!cfg)
+			return;
+
+		ret = find_descriptor(cfg->extra, cfg->extra_length,
+		    USB_DT_DFU, &func_dfu, sizeof(func_dfu));
+		if (ret > -1)
+			goto found_dfu;
+
+		for (intf_idx = 0; intf_idx < cfg->bNumInterfaces;
+		     intf_idx++) {
+			uif = &cfg->interface[intf_idx];
+			if (!uif)
+				break;
+
+			for (alt_idx = 0; alt_idx < cfg->interface[intf_idx].num_altsetting;
+			     alt_idx++) {
+				intf = &uif->altsetting[alt_idx];
+
+				ret = find_descriptor(intf->extra, intf->extra_length, USB_DT_DFU,
+				      &func_dfu, sizeof(func_dfu));
+				if (ret > -1)
+					goto found_dfu;
+
+				if (intf->bInterfaceClass != 0xfe ||
+				    intf->bInterfaceSubClass != 1)
+					continue;
+
+				has_dfu = 1;
+			}
+		}
+		if (has_dfu) {
+			/*
+			 * Finally try to retrieve it requesting the
+			 * device directly This is not supported on
+			 * all devices for non-standard types
+			 */
+			if (libusb_open(dev, &devh) == 0) {
+				ret = libusb_get_descriptor(devh, USB_DT_DFU, 0,
+				    (void *)&func_dfu, sizeof(func_dfu));
+				libusb_close(devh);
+				if (ret > -1)
+					goto found_dfu;
+			}
+			warnx("Device has DFU interface, "
+			    "but has no DFU functional descriptor");
+
+			/* fake version 1.0 */
+			func_dfu.bLength = 7;
+			func_dfu.bcdDFUVersion = libusb_cpu_to_le16(0x0100);
+			goto found_dfu;
+		}
+		libusb_free_config_descriptor(cfg);
+		continue;
+
+found_dfu:
+		if (func_dfu.bLength == 7) {
+			printf("Deducing device DFU version from functional descriptor "
+			    "length\n");
+			func_dfu.bcdDFUVersion = libusb_cpu_to_le16(0x0100);
+		} else if (func_dfu.bLength < 9) {
+			printf("Error obtaining DFU functional descriptor\n");
+			printf("Please report this as a bug!\n");
+			printf("Warning: Assuming DFU version 1.0\n");
+			func_dfu.bcdDFUVersion = libusb_cpu_to_le16(0x0100);
+			printf("Warning: Transfer size can not be detected\n");
+			func_dfu.wTransferSize = 0;
+		}
+
+		for (intf_idx = 0; intf_idx < cfg->bNumInterfaces;
+		     intf_idx++) {
+			if (match_iface_index > -1 && match_iface_index != intf_idx)
+				continue;
+
+			uif = &cfg->interface[intf_idx];
+			if (!uif)
+				break;
+
+			for (alt_idx = 0;
+			     alt_idx < uif->num_altsetting; alt_idx++) {
+				int dfu_mode;
+
+				intf = &uif->altsetting[alt_idx];
+				if (match_iface_alt_index > -1 && match_iface_alt_index != alt_idx)
+					continue;
+				if (intf->bInterfaceClass != 0xfe ||
+				    intf->bInterfaceSubClass != 1)
+					continue;
+
+				dfu_mode = (intf->bInterfaceProtocol == 2);
+				if (dfu_mode) {
+					if ((match_vendor_dfu >= 0 && match_vendor_dfu != desc->idVendor) ||
+					    (match_product_dfu >= 0 && match_product_dfu != desc->idProduct)) {
+						continue;
+					}
+				} else {
+					if ((match_vendor >= 0 && match_vendor != desc->idVendor) ||
+					    (match_product >= 0 && match_product != desc->idProduct)) {
+						continue;
+					}
+				}
+
+				if (libusb_open(dev, &devh))
+					break;
+				if (intf->iInterface != 0)
+					ret = libusb_get_string_descriptor_ascii(devh,
+					    intf->iInterface, (void *)alt_name, MAX_DESC_STR_LEN);
+				else
+					ret = -1;
+				if (ret < 1)
+					strcpy(alt_name, "UNKNOWN");
+				if (desc->iSerialNumber != 0)
+					ret = libusb_get_string_descriptor_ascii(devh,
+					    desc->iSerialNumber, (void *)serial_name, MAX_DESC_STR_LEN);
+				else
+					ret = -1;
+				if (ret < 1)
+					strcpy(serial_name, "UNKNOWN");
+				libusb_close(devh);
+
+				if (match_iface_alt_name != NULL && strcmp(alt_name, match_iface_alt_name))
+					continue;
+
+				if (dfu_mode) {
+					if (match_serial_dfu != NULL && strcmp(match_serial_dfu, serial_name))
+						continue;
+				} else {
+					if (match_serial != NULL && strcmp(match_serial, serial_name))
+						continue;
+				}
+
+				pdfu = dfu_malloc(sizeof(*pdfu));
+
+				memset(pdfu, 0, sizeof(*pdfu));
+
+				pdfu->func_dfu = func_dfu;
+				pdfu->dev = libusb_ref_device(dev);
+				pdfu->quirks = get_quirks(desc->idVendor,
+				    desc->idProduct, desc->bcdDevice);
+				pdfu->vendor = desc->idVendor;
+				pdfu->product = desc->idProduct;
+				pdfu->bcdDevice = desc->bcdDevice;
+				pdfu->configuration = cfg->bConfigurationValue;
+				pdfu->interface = intf->bInterfaceNumber;
+				pdfu->altsetting = intf->bAlternateSetting;
+				pdfu->devnum = libusb_get_device_address(dev);
+				pdfu->busnum = libusb_get_bus_number(dev);
+				pdfu->alt_name = strdup(alt_name);
+				if (pdfu->alt_name == NULL)
+					errx(EX_SOFTWARE, "Out of memory");
+				pdfu->serial_name = strdup(serial_name);
+				if (pdfu->serial_name == NULL)
+					errx(EX_SOFTWARE, "Out of memory");
+				if (dfu_mode)
+					pdfu->flags |= DFU_IFF_DFU;
+				if (pdfu->quirks & QUIRK_FORCE_DFU11) {
+					pdfu->func_dfu.bcdDFUVersion =
+					  libusb_cpu_to_le16(0x0110);
+				}
+				pdfu->bMaxPacketSize0 = desc->bMaxPacketSize0;
+
+				/* queue into list */
+				pdfu->next = dfu_root;
+				dfu_root = pdfu;
+			}
+		}
+		libusb_free_config_descriptor(cfg);
 	}
+}
 
-	/* Extra descriptors can be shared between alternate settings but
-	 * libusb may attach them to one setting. Therefore go through all.
-	 * Note that desc_index is per alternate setting, hits will not be
-	 * counted from one to another */
-	for (alt = 0; alt < cfg->interface[intf].num_altsetting;
-	     alt++) {
-		extra = cfg->interface[intf].altsetting[alt].extra;
-		extra_len = cfg->interface[intf].altsetting[alt].extra_length;
-		if (extra_len > 1)
-			ret = find_descriptor(extra, extra_len, desc_type,
-					      desc_index, resbuf, res_len);
-		if (ret > 1)
-			break;
+void probe_devices(libusb_context *ctx)
+{
+	libusb_device **list;
+	ssize_t num_devs;
+	ssize_t i;
+
+	num_devs = libusb_get_device_list(ctx, &list);
+	for (i = 0; i < num_devs; ++i) {
+		struct libusb_device_descriptor desc;
+		struct libusb_device *dev = list[i];
+
+		if (match_bus > -1 && match_bus != libusb_get_bus_number(dev))
+			continue;
+		if (match_device > -1 && match_device != libusb_get_device_address(dev))
+			continue;
+		if (libusb_get_device_descriptor(dev, &desc))
+			continue;
+		probe_configuration(dev, &desc);
 	}
-	libusb_free_config_descriptor(cfg);
-	if (ret < 2 && verbose)
-		printf("Did not find cached descriptor\n");
+	libusb_free_device_list(list, 0);
+}
 
-	return ret;
+void disconnect_devices(void)
+{
+	struct dfu_if *pdfu;
+	struct dfu_if *prev = NULL;
+
+	for (pdfu = dfu_root; pdfu != NULL; pdfu = pdfu->next) {
+		free(prev);
+		libusb_unref_device(pdfu->dev);
+		free(pdfu->alt_name);
+		free(pdfu->serial_name);
+		prev = pdfu;
+	}
+	free(prev);
+	dfu_root = NULL;
+}
+
+void print_dfu_if(struct dfu_if *dfu_if)
+{
+	printf("Found %s: [%04x:%04x] ver=%04x, devnum=%u, cfg=%u, intf=%u, "
+	       "alt=%u, name=\"%s\", serial=\"%s\"\n",
+	       dfu_if->flags & DFU_IFF_DFU ? "DFU" : "Runtime",
+	       dfu_if->vendor, dfu_if->product,
+	       dfu_if->bcdDevice, dfu_if->devnum,
+	       dfu_if->configuration, dfu_if->interface,
+	       dfu_if->altsetting, dfu_if->alt_name,
+	       dfu_if->serial_name);
+}
+
+/* Walk the device tree and print out DFU devices */
+void list_dfu_interfaces(void)
+{
+	struct dfu_if *pdfu;
+
+	for (pdfu = dfu_root; pdfu != NULL; pdfu = pdfu->next)
+		print_dfu_if(pdfu);
 }
