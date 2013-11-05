@@ -30,7 +30,6 @@
 #include <libusb.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <unistd.h>
 
 #include "portable.h"
 #include "dfu.h"
@@ -47,489 +46,129 @@
 
 int verbose = 0;
 
-/* USB string descriptor should contain max 126 UTF-16 characters
- * but 253 would even accomodate any UTF-8 encoding */
-#define MAX_DESC_STR_LEN 253
+struct dfu_if *dfu_root = NULL;
 
-/* Find DFU interfaces in a given device.
- * Iterate through all DFU interfaces and their alternate settings
- * and call the passed handler function on each setting until handler
- * returns non-zero. */
-static int find_dfu_if(libusb_device *dev,
-		       int (*handler)(struct dfu_if *, void *),
-		       void *v)
+int match_bus = -1;
+int match_device = -1;
+int match_vendor = -1;
+int match_product = -1;
+int match_vendor_dfu = -1;
+int match_product_dfu = -1;
+int match_config_index = -1;
+int match_iface_index = -1;
+int match_iface_alt_index = -1;
+const char *match_iface_alt_name = NULL;
+const char *match_serial = NULL;
+const char *match_serial_dfu = NULL;
+
+static int parse_match_value(const char *str, int default_value)
 {
-	struct libusb_device_descriptor desc;
-	struct libusb_config_descriptor *cfg;
-	const struct libusb_interface_descriptor *intf;
-	const struct libusb_interface *uif;
-	struct dfu_if _dif, *dfu_if = &_dif;
-	int cfg_idx, intf_idx, alt_idx;
-	int rc;
+	char *remainder;
+	int value;
 
-	memset(dfu_if, 0, sizeof(*dfu_if));
-	rc = libusb_get_device_descriptor(dev, &desc);
-	if (rc)
-		return rc;
-	for (cfg_idx = 0; cfg_idx < desc.bNumConfigurations;
-	     cfg_idx++) {
-		rc = libusb_get_config_descriptor(dev, cfg_idx, &cfg);
-		if (rc)
-			return rc;
-		/* in some cases, noticably FreeBSD if uid != 0,
-		 * the configuration descriptors are empty */
-		if (!cfg)
-			return 0;
-		for (intf_idx = 0; intf_idx < cfg->bNumInterfaces;
-		     intf_idx++) {
-			uif = &cfg->interface[intf_idx];
-			if (!uif)
-				return 0;
-			for (alt_idx = 0;
-			     alt_idx < uif->num_altsetting; alt_idx++) {
-				intf = &uif->altsetting[alt_idx];
-				if (!intf)
-					return 0;
-				if (intf->bInterfaceClass == 0xfe &&
-				    intf->bInterfaceSubClass == 1) {
-					dfu_if->dev = dev;
-					dfu_if->vendor = desc.idVendor;
-					dfu_if->product = desc.idProduct;
-					dfu_if->bcdDevice = desc.bcdDevice;
-					dfu_if->configuration = cfg->
-							bConfigurationValue;
-					dfu_if->interface =
-						intf->bInterfaceNumber;
-					dfu_if->altsetting =
-						intf->bAlternateSetting;
-					if (intf->bInterfaceProtocol == 2)
-						dfu_if->flags |= DFU_IFF_DFU;
-					else
-						dfu_if->flags &= ~DFU_IFF_DFU;
-					if (!handler)
-						return 1;
-					rc = handler(dfu_if, v);
-					if (rc != 0)
-						return rc;
-				}
-			}
-		}
-
-		libusb_free_config_descriptor(cfg);
-	}
-
-	return 0;
-}
-
-static int _get_first_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	/* Copy everything except the device handle.
-	 * This depends heavily on this member being last! */
-	memcpy(v_dif, dif, sizeof(*v_dif)-sizeof(libusb_device_handle *));
-
-	/* return a value that makes find_dfu_if return immediately */
-	return 1;
-}
-
-/* Fills in dif with the first found DFU interface */
-static int get_first_dfu_if(struct dfu_if *dif)
-{
-	return find_dfu_if(dif->dev, &_get_first_cb, (void *) dif);
-}
-
-static int _check_match_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	if (v_dif->flags & DFU_IFF_IFACE && 
-	    dif->interface != v_dif->interface)
-		return 0;
-	if (v_dif->flags & DFU_IFF_ALT &&
-	    dif->altsetting != v_dif->altsetting)
-		return 0;
-	return _get_first_cb(dif, v);
-}
-
-/* Fills in dif from the matching DFU interface/altsetting */
-static int get_matching_dfu_if(struct dfu_if *dif)
-{
-	return find_dfu_if(dif->dev, &_check_match_cb, (void *) dif);
-}
-
-static int _count_match_cb(struct dfu_if *dif, void *v)
-{
-	struct dfu_if *v_dif = (struct dfu_if*) v;
-
-	if (v_dif->flags & DFU_IFF_IFACE && 
-	    dif->interface != v_dif->interface)
-		return 0;
-	if (v_dif->flags & DFU_IFF_ALT &&
-	    dif->altsetting != v_dif->altsetting)
-		return 0;
-	v_dif->count++;
-	return 0;
-}
-
-/* Count matching DFU interface/altsetting */
-static int count_matching_dfu_if(struct dfu_if *dif)
-{
-	dif->count = 0;
-	find_dfu_if(dif->dev, &_count_match_cb, (void *) dif);
-	return dif->count;
-}
-
-/* Retrieves alternate interface name string.
- * Returns string length, or negative on error */
-static int get_alt_name(struct dfu_if *dfu_if, unsigned char *name)
-{
-	libusb_device *dev = dfu_if->dev;
-	struct libusb_config_descriptor *cfg;
-	int alt_name_str_idx;
-	int ret;
-
-	ret = libusb_get_config_descriptor_by_value(dev, dfu_if->configuration,
-						    &cfg);
-	if (ret)
-		return ret;
-
-	alt_name_str_idx = cfg->interface[dfu_if->interface].
-			       altsetting[dfu_if->altsetting].iInterface;
-	ret = -1;
-	if (alt_name_str_idx) {
-		if (!dfu_if->dev_handle)
-			if (libusb_open(dfu_if->dev, &dfu_if->dev_handle))
-				dfu_if->dev_handle = NULL;
-		if (dfu_if->dev_handle)
-			ret = libusb_get_string_descriptor_ascii(
-					dfu_if->dev_handle, alt_name_str_idx,
-					name, MAX_DESC_STR_LEN);
-	}
-	libusb_free_config_descriptor(cfg);
-	return ret;
-}
-
-static int print_dfu_if(struct dfu_if *dfu_if, void *v)
-{
-	unsigned char name[MAX_DESC_STR_LEN+1] = "UNDEFINED";
-
-	get_alt_name(dfu_if, name);
-
-	printf("Found %s: [%04x:%04x] devnum=%u, cfg=%u, intf=%u, "
-	       "alt=%u, name=\"%s\"\n", 
-	       dfu_if->flags & DFU_IFF_DFU ? "DFU" : "Runtime",
-	       dfu_if->vendor, dfu_if->product, dfu_if->devnum,
-	       dfu_if->configuration, dfu_if->interface,
-	       dfu_if->altsetting, name);
-	return 0;
-}
-
-/* Walk the device tree and print out DFU devices */
-static int list_dfu_interfaces(libusb_context *ctx)
-{
-	libusb_device **list;
-	libusb_device *dev;
-	ssize_t num_devs, i;
-
-	num_devs = libusb_get_device_list(ctx, &list);
-
-	for (i = 0; i < num_devs; ++i) {
-		dev = list[i];
-		find_dfu_if(dev, &print_dfu_if, NULL);
-	}
-
-	libusb_free_device_list(list, 1);
-	return 0;
-}
-
-static int alt_by_name(struct dfu_if *dfu_if, void *v)
-{
-	unsigned char name[MAX_DESC_STR_LEN+1];
-
-	if (get_alt_name(dfu_if, name) < 0)
-		return 0;
-	if (strcmp((char *)name, v))
-		return 0;
-	/*
-	 * Return altsetting+1 so that we can use return value 0 to indicate
-	 * "not found".
-	 */
-	return dfu_if->altsetting+1;
-}
-
-static int _count_cb(struct dfu_if *dif, void *v)
-{
-	int *count = (int*) v;
-
-	(*count)++;
-
-	return 0;
-}
-
-/* Count DFU interfaces within a single device */
-static int count_dfu_interfaces(libusb_device *dev)
-{
-	int num_found = 0;
-
-	find_dfu_if(dev, &_count_cb, (void *) &num_found);
-
-	return num_found;
-}
-
-
-/* Iterate over all matching DFU capable devices within system */
-static int iterate_dfu_devices(libusb_context *ctx, struct dfu_if *dif,
-    int (*action)(struct libusb_device *dev, void *user), void *user)
-{
-	libusb_device **list;
-	ssize_t num_devs, i;
-
-	num_devs = libusb_get_device_list(ctx, &list);
-	for (i = 0; i < num_devs; ++i) {
-		int retval;
-		struct libusb_device_descriptor desc;
-		struct libusb_device *dev = list[i];
-
-		if (dif && (dif->flags & DFU_IFF_DEVNUM) &&
-		    (libusb_get_bus_number(dev) != dif->bus ||
-		     libusb_get_device_address(dev) != dif->devnum))
-			continue;
-		if (libusb_get_device_descriptor(dev, &desc))
-			continue;
-		if (dif && (dif->flags & DFU_IFF_VENDOR) &&
-		    desc.idVendor != dif->vendor)
-			continue;
-		if (dif && (dif->flags & DFU_IFF_PRODUCT) &&
-		    desc.idProduct != dif->product)
-			continue;
-		if (!count_dfu_interfaces(dev))
-			continue;
-
-		retval = action(dev, user);
-		if (retval) {
-			libusb_free_device_list(list, 0);
-			return retval;
+	if (str == NULL) {
+		value = default_value;
+	} else if (*str == '*') {
+		value = -1; /* Match anything */
+	} else if (*str == '-') {
+		value = 0x10000; /* Impossible vendor/product ID */
+	} else {
+		value = strtoul(str, &remainder, 16);
+		if (remainder == str) {
+			value = default_value;
 		}
 	}
-	libusb_free_device_list(list, 0);
-	return 0;
+	return value;
 }
 
-
-static int found_dfu_device(struct libusb_device *dev, void *user)
+static void parse_vendprod(const char *str)
 {
-	struct dfu_if *dif = (struct dfu_if*) user;
-
-	dif->dev = dev;
-	return 1;
-}
-
-
-/* Find the first DFU-capable device, save it in dfu_if->dev */
-static int get_first_dfu_device(libusb_context *ctx, struct dfu_if *dif)
-{
-	return iterate_dfu_devices(ctx, dif, found_dfu_device, dif);
-}
-
-
-static int count_one_dfu_device(struct libusb_device *dev, void *user)
-{
-	int *num = (int*) user;
-
-	(*num)++;
-	return 0;
-}
-
-
-/* Count DFU capable devices within system */
-static int count_dfu_devices(libusb_context *ctx, struct dfu_if *dif)
-{
-	int num_found = 0;
-
-	iterate_dfu_devices(ctx, dif, count_one_dfu_device, &num_found);
-	return num_found;
-}
-
-
-static void parse_vendprod(uint16_t *vendor, uint16_t *product,
-			   const char *str)
-{
+	const char *comma;
 	const char *colon;
 
-	*vendor = strtoul(str, NULL, 16);
-	colon = strchr(str, ':');
-	if (colon)
-		*product = strtoul(colon + 1, NULL, 16);
-	else
-		*product = 0;
+	/* Default to match any DFU device in runtime or DFU mode */
+	match_vendor = -1;
+	match_product = -1;
+	match_vendor_dfu = -1;
+	match_product_dfu = -1;
+
+	comma = strchr(str, ',');
+	if (comma == str) {
+		/* DFU mode vendor/product being specified without any runtime
+		 * vendor/product specification, so don't match any runtime device */
+		match_vendor = match_product = 0x10000;
+	} else {
+		colon = strchr(str, ':');
+		if (colon != NULL) {
+			++colon;
+			if ((comma != NULL) && (colon > comma)) {
+				colon = NULL;
+			}
+		}
+		match_vendor = parse_match_value(str, match_vendor);
+		match_product = parse_match_value(colon, match_product);
+		if (comma != NULL) {
+			/* Both runtime and DFU mode vendor/product specifications are
+			 * available, so default DFU mode match components to the given
+			 * runtime match components */
+			match_vendor_dfu = match_vendor;
+			match_product_dfu = match_product;
+		}
+	}
+	if (comma != NULL) {
+		++comma;
+		colon = strchr(comma, ':');
+		if (colon != NULL) {
+			++colon;
+		}
+		match_vendor_dfu = parse_match_value(comma, match_vendor_dfu);
+		match_product_dfu = parse_match_value(colon, match_product_dfu);
+	}
 }
 
+static void parse_serial(char *str)
+{
+	char *comma;
+
+	match_serial = str;
+	comma = strchr(str, ',');
+	if (comma == NULL) {
+		match_serial_dfu = match_serial;
+	} else {
+		*comma++ = 0;
+		match_serial_dfu = comma;
+	}
+	if (*match_serial == 0) match_serial = NULL;
+	if (*match_serial_dfu == 0) match_serial_dfu = NULL;
+}
 
 #ifdef HAVE_USBPATH_H
 
-static int resolve_device_path(struct dfu_if *dif)
+static int resolve_device_path(char *path)
 {
 	int res;
 
-	res = usb_path2devnum(dif->path);
+	res = usb_path2devnum(path);
 	if (res < 0)
 		return -EINVAL;
 	if (!res)
 		return 0;
 
-	dif->bus = atoi(dif->path);
-	dif->devnum = res;
-	dif->flags |= DFU_IFF_DEVNUM;
-	return res;
+	match_bus = atoi(path);
+	match_device = res;
+
+	return 0;
 }
 
 #else /* HAVE_USBPATH_H */
 
-static int resolve_device_path(struct dfu_if *dif)
+static int resolve_device_path(char *path)
 {
-	fprintf(stderr,
-	    "USB device paths are not supported by this dfu-util.\n");
-	exit(1);
+	(void)path; /* Eliminate unused variable warning */
+	errx(EX_SOFTWARE, "USB device paths are not supported by this dfu-util.\n");
 }
 
 #endif /* !HAVE_USBPATH_H */
-
-/* Look for a descriptor in a concatenated descriptor list
- * Will return desc_index'th match of given descriptor type
- * Returns length of found descriptor, limited to res_size */
-static int find_descriptor(const unsigned char *desc_list, int list_len,
-			   uint8_t desc_type, uint8_t desc_index,
-			   uint8_t *res_buf, int res_size)
-{
-	int p = 0;
-	int hit = 0;
-
-	while (p + 1 < list_len) {
-		int desclen;
-
-		desclen = (int) desc_list[p];
-		if (desclen == 0) {
-			fprintf(stderr, "Error: Invalid descriptor list\n");
-			return -1;
-		}
-		if (desc_list[p + 1] == desc_type && hit++ == desc_index) {
-			if (desclen > res_size)
-				desclen = res_size;
-			if (p + desclen > list_len)
-				desclen = list_len - p;
-			memcpy(res_buf, &desc_list[p], desclen);
-			return desclen;
-		}
-		p += (int) desc_list[p];
-	}
-	return 0;
-}
-
-/* Look for a descriptor in the active configuration
- * Will also find extra descriptors which are normally
- * not returned by the standard libusb_get_descriptor() */
-static int usb_get_any_descriptor(struct libusb_device_handle *dev_handle,
-				  uint8_t desc_type,
-				  uint8_t desc_index,
-				  unsigned char *resbuf, int res_len)
-{
-	struct libusb_device *dev;
-	struct libusb_config_descriptor *config;
-	int ret;
-	uint16_t conflen;
-	unsigned char *cbuf;
-
-	dev = libusb_get_device(dev_handle);
-	if (!dev) {
-		fprintf(stderr, "Error: Broken device handle\n");
-		return -1;
-	}
-	/* Get the total length of the configuration descriptors */
-	ret = libusb_get_active_config_descriptor(dev, &config);
-	if (ret == LIBUSB_ERROR_NOT_FOUND) {
-		fprintf(stderr, "Error: Device is unconfigured\n");
-		return -1;
-	} else if (ret) {
-		fprintf(stderr, "Error: failed "
-			"libusb_get_active_config_descriptor()\n");
-		exit(1);
-	}
-	conflen = config->wTotalLength;
-	libusb_free_config_descriptor(config);
-
-	/* Suck in the configuration descriptor list from device */
-	cbuf = malloc(conflen);
-	ret = libusb_get_descriptor(dev_handle, LIBUSB_DT_CONFIG,
-				    desc_index, cbuf, conflen);
-	if (ret < conflen) {
-		fprintf(stderr, "Warning: failed to retrieve complete "
-			"configuration descriptor, got %i/%i\n",
-			ret, conflen);
-		conflen = ret;
-	}
-	/* Search through the configuration descriptor list */
-	ret = find_descriptor(cbuf, conflen, desc_type, desc_index,
-			      resbuf, res_len);
-	free(cbuf);
-
-	/* A descriptor must be at least 2 bytes long */
-	if (ret > 1) {
-		if (verbose)
-			printf("Found descriptor in complete configuration "
-			       "descriptor list\n");
-		return ret;
-	}
-
-	/* Finally try to retrieve it requesting the device directly
-	 * This is not supported on all devices for non-standard types */
-	return libusb_get_descriptor(dev_handle, desc_type, desc_index,
-				     resbuf, res_len);
-}
-
-/* Get cached extra descriptor from libusb for an interface
- * Returns length of found descriptor */
-static int get_cached_extra_descriptor(struct libusb_device *dev,
-				       uint8_t bConfValue,
-				       uint8_t intf,
-				       uint8_t desc_type, uint8_t desc_index,
-				       unsigned char *resbuf, int res_len)
-{
-	struct libusb_config_descriptor *cfg;
-	const unsigned char *extra;
-	int extra_len;
-	int ret;
-	int alt;
-
-	ret = libusb_get_config_descriptor_by_value(dev, bConfValue, &cfg);
-	if (ret == LIBUSB_ERROR_NOT_FOUND) {
-		fprintf(stderr, "Error: Device is unconfigured\n");
-		return -1;
-	} else if (ret) {
-		fprintf(stderr, "Error: failed "
-			"libusb_config_descriptor_by_value()\n");
-		exit(1);
-	}
-
-	/* Extra descriptors can be shared between alternate settings but
-	 * libusb may attach them to one setting. Therefore go through all.
-	 * Note that desc_index is per alternate setting, hits will not be
-	 * counted from one to another */
-	for (alt = 0; alt < cfg->interface[intf].num_altsetting;
-	     alt++) {
-		extra = cfg->interface[intf].altsetting[alt].extra;
-		extra_len = cfg->interface[intf].altsetting[alt].extra_length;
-		if (extra_len > 1)
-			ret = find_descriptor(extra, extra_len, desc_type,
-					      desc_index, resbuf, res_len);
-		if (ret > 1)
-			break;
-	}
-	libusb_free_config_descriptor(cfg);
-	if (ret < 2 && verbose)
-		printf("Did not find cached descriptor\n");
-	return ret;
-}
 
 static void help(void)
 {
@@ -537,19 +176,24 @@ static void help(void)
 		"  -h --help\t\t\tPrint this help message\n"
 		"  -V --version\t\t\tPrint the version number\n"
 		"  -v --verbose\t\t\tPrint verbose debug statements\n"
-		"  -l --list\t\t\tList the currently attached DFU capable USB devices\n");
-	printf(	"  -e --detach\t\t\tDetach the currently attached DFU capable USB devices\n"
-		"  -d --device vendor:product\tSpecify Vendor/Product ID of DFU device\n"
-		"  -p --path bus-port. ... .port\tSpecify path to DFU device\n"
-		"  -c --cfg config_nr\t\tSpecify the Configuration of DFU device\n"
-		"  -i --intf intf_nr\t\tSpecify the DFU Interface number\n"
-		"  -a --alt alt\t\t\tSpecify the Altsetting of the DFU Interface\n"
+		"  -l --list\t\t\tList currently attached DFU capable devices\n");
+	fprintf(stderr, "  -e --detach\t\t\tDetach currently attached DFU capable devices\n"
+		"  -E --detach-delay seconds\tTime to wait before reopening a device after detach\n"
+		"  -d --device <vendor>:<product>[,<vendor_dfu>:<product_dfu>]\n"
+		"\t\t\t\tSpecify Vendor/Product ID(s) of DFU device\n"
+		"  -p --path <bus-port. ... .port>\tSpecify path to DFU device\n"
+		"  -c --cfg <config_nr>\t\tSpecify the Configuration of DFU device\n"
+		"  -i --intf <intf_nr>\t\tSpecify the DFU Interface number\n"
+		"  -S --serial <serial_string>[,<serial_string_dfu>]\n"
+		"\t\t\t\tSpecify Serial String of DFU device\n"
+		"  -a --alt <alt>\t\tSpecify the Altsetting of the DFU Interface\n"
 		"\t\t\t\tby name or by number\n");
-	printf(	"  -t --transfer-size\t\tSpecify the number of bytes per USB Transfer\n"
-		"  -U --upload file\t\tRead firmware from device into <file>\n"
-		"  -D --download file\t\tWrite firmware from <file> into device\n"
+	fprintf(stderr, "  -t --transfer-size <size>\tSpecify the number of bytes per USB Transfer\n"
+		"  -U --upload <file>\t\tRead firmware from device into <file>\n"
+		"  -Z --upload-size <bytes>\tSpecify the expected upload size in bytes\n"
+		"  -D --download <file>\t\tWrite firmware from <file> into device\n"
 		"  -R --reset\t\t\tIssue USB Reset signalling once we're finished\n"
-		"  -s --dfuse-address address\tST DfuSe mode, specify target address for\n"
+		"  -s --dfuse-address <address>\tST DfuSe mode, specify target address for\n"
 		"\t\t\t\traw file download or upload. Not applicable for\n"
 		"\t\t\t\tDfuSe file (.dfu) downloads\n"
 		);
@@ -589,22 +233,12 @@ static struct option opts[] = {
 	{ "dfuse-address", 1, 0, 's' }
 };
 
-enum mode {
-	MODE_NONE,
-	MODE_VERSION,
-	MODE_LIST,
-	MODE_DETACH,
-	MODE_UPLOAD,
-	MODE_DOWNLOAD
-};
-
 int main(int argc, char **argv)
 {
 	int expected_size = 0;
 	unsigned int transfer_size = 0;
 	enum mode mode = MODE_NONE;
 	struct dfu_status status;
-	struct usb_dfu_func_descriptor func_dfu = {0}, func_dfu_rt = {0};
 	libusb_context *ctx;
 	struct dfu_file file;
 	char *end;
@@ -625,7 +259,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int c, option_index = 0;
-		c = getopt_long(argc, argv, "hVvled:p:c:i:a:t:U:D:Rs:", opts,
+		c = getopt_long(argc, argv, "hVvleE:d:p:c:i:a:S:t:U:D:Rs:Z:", opts,
 				&option_index);
 		if (c == -1)
 			break;
@@ -672,10 +306,14 @@ int main(int argc, char **argv)
 			break;
 		case 'a':
 			/* Interface Alternate Setting */
-			dif->altsetting = strtoul(optarg, &end, 0);
-			if (*end)
-				alt_name = optarg;
-			dif->flags |= DFU_IFF_ALT;
+			match_iface_alt_index = strtoul(optarg, &end, 0);
+			if (*end) {
+				match_iface_alt_name = optarg;
+				match_iface_alt_index = -1;
+			}
+			break;
+		case 'S':
+			parse_serial(optarg);
 			break;
 		case 't':
 			transfer_size = atoi(optarg);
@@ -1011,37 +649,22 @@ status_again:
 		break;
 
 	case MODE_DOWNLOAD:
-		file.filep = fopen(file.name, "rb");
-		if (file.filep == NULL) {
-			perror(file.name);
-			exit(1);
-		}
-		ret = parse_dfu_suffix(&file);
-		if (ret < 0)
-			exit(1);
-		if (ret == 0) {
-			fprintf(stderr, "Warning: File has no DFU suffix\n");
-		} else if (file.bcdDFU != 0x0100 && file.bcdDFU != 0x11a) {
-			fprintf(stderr, "Unsupported DFU file revision "
-				"%04x\n", file.bcdDFU);
-			exit(1);
-		}
-		if (file.idVendor != 0xffff &&
-		    dif->vendor != file.idVendor) {
-			fprintf(stderr, "Warning: File vendor ID %04x does "
-				"not match device %04x\n", file.idVendor, dif->vendor);
-		}
-		if (file.idProduct != 0xffff &&
-		    dif->product != file.idProduct) {
-			fprintf(stderr, "Warning: File product ID %04x does "
-				"not match device %04x\n", file.idProduct, dif->product);
+		if (((file.idVendor  != 0xffff && file.idVendor  != runtime_vendor) ||
+		     (file.idProduct != 0xffff && file.idProduct != runtime_product)) &&
+		    ((file.idVendor  != 0xffff && file.idVendor  != dfu_root->vendor) ||
+		     (file.idProduct != 0xffff && file.idProduct != dfu_root->product))) {
+			errx(EX_IOERR, "Error: File ID %04x:%04x does "
+				"not match device (%04x:%04x or %04x:%04x)",
+				file.idVendor, file.idProduct,
+				runtime_vendor, runtime_product,
+				dfu_root->vendor, dfu_root->product);
 		}
 		if (dfuse_device || dfuse_options || file.bcdDFU == 0x11a) {
-		        if (dfuse_do_dnload(dif, transfer_size, file,
+		        if (dfuse_do_dnload(dfu_root, transfer_size, &file,
 							dfuse_options) < 0)
 				exit(1);
 		} else {
-			if (dfuload_do_dnload(dif, transfer_size, file) < 0)
+			if (dfuload_do_dnload(dfu_root, transfer_size, &file) < 0)
 				exit(1);
 	 	}
 		break;

@@ -79,12 +79,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\src\lmdfu.c" />
     <ClCompile Include="..\src\dfu_file.c" />
     <ClCompile Include="..\src\suffix.c" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\src\lmdfu.h" />
     <ClInclude Include="..\src\dfu_file.h" />
     <ClInclude Include="..\src\portable.h" />
   </ItemGroup>

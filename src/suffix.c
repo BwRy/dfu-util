@@ -25,13 +25,6 @@
 
 #include "portable.h"
 #include "dfu_file.h"
-#include "lmdfu.h"
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-#ifdef HAVE_FTRUNCATE
-# include <unistd.h>
-#endif
 
 enum mode {
 	MODE_NONE,
@@ -49,20 +42,20 @@ int verbose;
 
 static void help(void)
 {
-	printf("Usage: dfu-suffix [options] <file>\n"
-		"  -h --help\tPrint this help message\n"
-		"  -V --version\tPrint the version number\n"
-		"  -D --delete\tDelete DFU suffix from <file>\n"
-		"  -p --pid\tAdd product ID into DFU suffix in <file>\n"
-		"  -v --vid\tAdd vendor ID into DFU suffix in <file>\n"
-		"  -d --did\tAdd device ID into DFU suffix in <file>\n"
-		"  -c --check\tCheck DFU suffix of <file>\n"
-		"  -a --add\tAdd DFU suffix to <file>\n"
+	fprintf(stderr, "Usage: dfu-suffix [options] ...\n"
+		"  -h --help\t\t\tPrint this help message\n"
+		"  -V --version\t\t\tPrint the version number\n"
+		"  -c --check <file>\t\tCheck DFU suffix of <file>\n"
+		"  -a --add <file>\t\tAdd DFU suffix to <file>\n"
+		"  -D --delete <file>\t\tDelete DFU suffix from <file>\n"
+		"  -p --pid <productID>\t\tAdd product ID into DFU suffix in <file>\n"
+		"  -v --vid <vendorID>\t\tAdd vendor ID into DFU suffix in <file>\n"
+		"  -d --did <deviceID>\t\tAdd device ID into DFU suffix in <file>\n"
 		);
-	printf( "  -s --stellaris-address <address>  Add TI Stellaris address "
-		"prefix to <file>,\n\t\tto be used together with -a\n"
-		"  -T --stellaris  Act on TI Stellaris extension prefix of "
-		"<file>, to be used\n\t\tin combination with -D or -c\n"
+	fprintf(stderr, "  -s --stellaris-address <address>  Add TI Stellaris address prefix to <file>,\n\t\t\t\t"
+		"to be used in combination with -a\n"
+		"  -T --stellaris\t\tAct on TI Stellaris address prefix of <file>, \n\t\t\t\t"
+		"to be used in combination with -D or -c\n"
 		);
 	exit(EX_USAGE);
 }
@@ -104,46 +97,6 @@ static void show_suffix_and_prefix(struct dfu_file *file)
 		printf("Length:\t\t%i\n", file->size.suffix);
 		printf("CRC:\t\t0x%08X\n", file->dwCRC);
 	}
-
-	return ret;
-}
-
-static int remove_suffix(struct dfu_file *file)
-{
-	int ret;
-
-	ret = parse_dfu_suffix(file);
-	if (ret <= 0)
-		return 0;
-
-#ifdef HAVE_FTRUNCATE
-	/* There is no easy way to truncate to a size with stdio */
-	ret = ftruncate(fileno(file->filep),
-			(long) file->size - file->suffixlen);
-	if (ret < 0) {
-		perror("ftruncate");
-		exit(1);
-	}
-	printf("DFU suffix removed\n");
-#else
-	printf("Suffix removal not implemented on this platform\n");
-#endif /* HAVE_FTRUNCATE */
-	return 1;
-}
-
-static void add_suffix(struct dfu_file *file, int pid, int vid, int did) {
-	int ret;
-
-	file->idProduct = pid;
-	file->idVendor = vid;
-	file->bcdDevice = did;
-
-	ret = generate_dfu_suffix(file);
-	if (ret < 0) {
-		perror("generate");
-		exit(1);
-	}
-	printf("New DFU suffix added.\n");
 }
 
 int main(int argc, char **argv)

@@ -25,7 +25,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
 #include <fcntl.h>
 
 #include "portable.h"
@@ -89,10 +88,10 @@ void dfu_progress_bar(const char *desc, unsigned long long curr,
 		unsigned long long max)
 {
 	static char buf[PROGRESS_BAR_WIDTH + 1];
-	static int last_progress = -1;
+	static unsigned long long last_progress = -1;
 	static time_t last_time;
 	time_t curr_time = time(NULL);
-	int progress;
+	unsigned long long progress;
 	int x;
 
 	/* check for not known maximum */
@@ -183,10 +182,7 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 	/* default values, if no valid prefix is found */
 	file->lmdfu_address = 0;
 
-	if (file->size < sizeof(dfusuffix)) {
-		fprintf(stderr, "File too short for DFU suffix\n");
-		return 0;
-	}
+	file->firmware = (uint8_t*)dfu_malloc(file->size.total);
 
 	if (read(f, file->firmware, file->size.total) != file->size.total) {
 		err(EX_IOERR, "Could not read %d bytes from %s",
@@ -202,23 +198,11 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 		if (file->size.total < DFU_SUFFIX_LENGTH)
 			errx(EX_IOERR, "File too short for DFU suffix");
 
-	ret = fseek(file->filep, -sizeof(dfusuffix), SEEK_END);
-	if (ret < 0) {
-		fprintf(stderr, "Could not seek to DFU suffix\n");
-		perror(file->name);
-		goto out_rewind;
-	}
+		dfusuffix = file->firmware + file->size.total -
+		    DFU_SUFFIX_LENGTH;
 
-	ret = fread(dfusuffix, 1, sizeof(dfusuffix), file->filep);
-	if (ret < 0) {
-		fprintf(stderr, "Could not read DFU suffix\n");
-		perror(file->name);
-		goto out_rewind;
-	} else if (ret < sizeof(dfusuffix)) {
-		fprintf(stderr, "Could not read whole DFU suffix\n");
-		ret = -EIO;
-		goto out_rewind;
-	}
+		for (i = 0; i < file->size.total - 4; i++)
+			crc = crc32_byte(crc, file->firmware[i]);
 
 		if (dfusuffix[10] != 'D' ||
 		    dfusuffix[9]  != 'F' ||
@@ -340,14 +324,12 @@ void dfu_store_file(struct dfu_file *file, int have_suffix, int have_prefix)
 		crc = dfu_file_write_crc(f, crc, dfusuffix,
 		    DFU_SUFFIX_LENGTH - 4);
 
-	/* Add the suffix at the end of the file */
-	ret = fwrite(dfusuffix, 1, sizeof(dfusuffix), file->filep);
-	if (ret < 0) {
-		fprintf(stderr, "Could not write DFU suffix\n");
-		perror(file->name);
-	} else if (ret < sizeof(dfusuffix)) {
-		fprintf(stderr, "Could not write whole DFU suffix\n");
-		ret = -EIO;
+		dfusuffix[12] = crc;
+		dfusuffix[13] = crc >> 8;
+		dfusuffix[14] = crc >> 16;
+		dfusuffix[15] = crc >> 24;
+
+		crc = dfu_file_write_crc(f, crc, dfusuffix + 12, 4);
 	}
 	close(f);
 }

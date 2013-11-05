@@ -401,7 +401,9 @@ int dfuse_dnload_element(struct dfu_if *dif, unsigned int dwElementAddress,
 			dwElementAddress + dwElementSize - 1);
 	}
 
-	for (p = 0; p < dwElementSize; p += xfer_size) {
+	dfu_progress_bar("Download", 0, 1);
+
+	for (p = 0; p < (int)dwElementSize; p += xfer_size) {
 		int page_size;
 		unsigned int erase_address;
 		unsigned int address = dwElementAddress + p;
@@ -494,18 +496,7 @@ int dfuse_do_bin_dnload(struct dfu_if *dif, int xfer_size,
 	printf("Downloading to address = 0x%08x, size = %i\n",
 	       dwElementAddress, dwElementSize);
 
-	data = malloc(dwElementSize);
-	if (!data) {
-		fprintf(stderr, "Could not allocate data buffer\n");
-		return -ENOMEM;
-	}
-	ret = fread(data, 1, dwElementSize, file.filep);
-	read_bytes += ret;
-	if (ret < dwElementSize) {
-		fprintf(stderr, "Could not read data\n");
-		ret = -EINVAL;
-		goto out_free;
-	}
+	data = file->firmware + file->size.prefix;
 
 	ret = dfuse_dnload_element(dif, dwElementAddress, dwElementSize, data,
 				   xfer_size);
@@ -537,12 +528,8 @@ int dfuse_do_dfuse_dnload(struct dfu_if *dif, int xfer_size,
 	int ret;
 	int rem;
 
-	/* Must be larger than a minimal DfuSe header and suffix */
-	if (file.size <= sizeof(dfuprefix) + file.suffixlen +
-	    sizeof(targetprefix) + sizeof(elementheader)) {
-		fprintf(stderr, "File too small for a DfuSe file\n");
-		return -EINVAL;
-	}
+	rem = file->size.total - file->size.prefix - file->size.suffix;
+	data = file->firmware + file->size.prefix;
 
         /* Must be larger than a minimal DfuSe header and suffix */
 	if (rem < (int)(sizeof(dfuprefix) +
@@ -566,14 +553,9 @@ int dfuse_do_dfuse_dnload(struct dfu_if *dif, int xfer_size,
 
 	for (image = 1; image <= bTargets; image++) {
 		printf("parsing DFU image %i\n", image);
-		ret = fread(targetprefix, 1, sizeof(targetprefix), file.filep);
-		read_bytes += ret;
-		if (ret < sizeof(targetprefix)) {
-			fprintf(stderr, "Could not read DFU header\n");
-			return -EIO;
-		}
-		if (strncmp(targetprefix, "Target", 6)) {
-			fprintf(stderr, "No valid target signature\n");
+		dfuse_memcpy(targetprefix, &data, &rem, sizeof(targetprefix));
+		if (strncmp((char *)targetprefix, "Target", 6)) {
+			errx(EX_IOERR, "No valid target signature");
 			return -EINVAL;
 		}
 		bAlternateSetting = targetprefix[6];
@@ -589,14 +571,7 @@ int dfuse_do_dfuse_dnload(struct dfu_if *dif, int xfer_size,
 			       " to download this image!\n");
 		for (element = 1; element <= dwNbElements; element++) {
 			printf("parsing element %i, ", element);
-			ret = fread(elementheader, 1, sizeof(elementheader),
-				    file.filep);
-			read_bytes += ret;
-			if (ret < sizeof(elementheader)) {
-				fprintf(stderr,
-					"Could not read element header\n");
-				return -EINVAL;
-			}
+			dfuse_memcpy(elementheader, &data, &rem, sizeof(elementheader));
 			dwElementAddress =
 			    quad2uint((unsigned char *)elementheader);
 			dwElementSize =
@@ -605,24 +580,14 @@ int dfuse_do_dfuse_dnload(struct dfu_if *dif, int xfer_size,
 			printf("size = %i\n", dwElementSize);
 
 			/* sanity check */
-			if (read_bytes + dwElementSize + file.suffixlen >
-			    file.size) {
-				fprintf(stderr,
-					"File too small for element size\n");
-				return -EINVAL;
-			}
-			data = malloc(dwElementSize);
-			if (!data) {
-				fprintf(stderr,
-					"Could not allocate data buffer\n");
-				return -ENOMEM;
-			}
-			ret = fread(data, 1, dwElementSize, file.filep);
-			read_bytes += ret;
-			if (ret < dwElementSize) {
-				fprintf(stderr, "Could not read data\n");
-				free(data);
-				return -EIO;
+			if ((int)dwElementSize > rem)
+				errx(EX_SOFTWARE, "File too small for element size");
+
+			if (bAlternateSetting == dif->altsetting) {
+				ret = dfuse_dnload_element(dif, dwElementAddress,
+				    dwElementSize, data, xfer_size);
+			} else {
+				ret = 0;
 			}
 
 			/* advance read pointer */

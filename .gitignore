@@ -22,4 +22,14 @@ src/dfu-version.h
 stamp-h1
 Win32/
 www/Makefile
+<<<<<<< HEAD
 x64/
+=======
+msvc/dfu-util_2010.suo
+msvc/dfu-suffix_2010.vcxproj.user
+msvc/dfu-util_2010.opensdf
+msvc/dfu-util_2010.sdf
+Win32
+msvc/ipch
+msvc/dfu-util_2010.vcxproj.user
+>>>>>>> 09987a831894b61fcab1c867189d43a756967a46
