@@ -19,3 +19,10 @@ src/dfu-util
 src/dfu-version.h
 stamp-h1
 www/Makefile
+msvc/dfu-util_2010.suo
+msvc/dfu-suffix_2010.vcxproj.user
+msvc/dfu-util_2010.opensdf
+msvc/dfu-util_2010.sdf
+Win32
+msvc/ipch
+msvc/dfu-util_2010.vcxproj.user

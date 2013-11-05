@@ -25,7 +25,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
-#include <unistd.h>
 #include <fcntl.h>
 
 #include "portable.h"
@@ -89,10 +88,10 @@ void dfu_progress_bar(const char *desc, unsigned long long curr,
 		unsigned long long max)
 {
 	static char buf[PROGRESS_BAR_WIDTH + 1];
-	static int last_progress = -1;
+	static unsigned long long last_progress = -1;
 	static time_t last_time;
 	time_t curr_time = time(NULL);
-	int progress;
+	unsigned long long progress;
 	int x;
 
 	/* check for not known maximum */
@@ -183,7 +182,7 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 	/* default values, if no valid prefix is found */
 	file->lmdfu_address = 0;
 
-	file->firmware = dfu_malloc(file->size.total);
+	file->firmware = (uint8_t*)dfu_malloc(file->size.total);
 
 	if (read(f, file->firmware, file->size.total) != file->size.total) {
 		err(EX_IOERR, "Could not read %d bytes from %s",
