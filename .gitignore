@@ -1,26 +1,22 @@
+<<<<<<< HEAD
 .cproject
 .project
 src/*.o
+=======
+>>>>>>> 4dc9c78dad533eb0ee9c9ab473a002772b9093a9
 Makefile
-Makefile.in
-aclocal.m4
+*/Makefile
 autom4te.cache/
 config.h
-config.h.in
-config.log
-config.status
 configure
-doc/Makefile
-doc/Makefile.in
 m4/
 src/.deps/
-src/Makefile
-src/Makefile.in
 src/dfu-suffix
 src/dfu-util
 src/dfu-version.h
 stamp-h1
 Win32/
+<<<<<<< HEAD
 www/Makefile
 <<<<<<< HEAD
 x64/
@@ -33,3 +29,16 @@ Win32
 msvc/ipch
 msvc/dfu-util_2010.vcxproj.user
 >>>>>>> 09987a831894b61fcab1c867189d43a756967a46
+=======
+msvc/ipch/
+*.log
+*.status
+*.m4
+*.o
+*.in
+*.suo
+*.user
+*.opensdf
+*.sdf
+*~
+>>>>>>> 4dc9c78dad533eb0ee9c9ab473a002772b9093a9
