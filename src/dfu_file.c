@@ -92,7 +92,7 @@ void dfu_progress_bar(const char *desc, unsigned long long curr,
 	static time_t last_time;
 	time_t curr_time = time(NULL);
 	unsigned long long progress;
-	int x;
+	unsigned long long x;
 
 	/* check for not known maximum */
 	if (max < curr)
