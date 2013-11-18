@@ -81,7 +81,7 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <PostBuildEvent>
-      <Command>copy $(SolutionDir)..\$(Platform)\$(Configuration)\dll\libusb-1.0.dll  $(SolutionDir)..\$(Platform)\$(ProjectName)\$(Configuration)\</Command>
+      <Command>copy "$(SolutionDir)..\$(Platform)\$(Configuration)\dll\libusb-1.0.dll"  "$(SolutionDir)..\$(Platform)\$(ProjectName)\$(Configuration)\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
