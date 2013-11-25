@@ -34,6 +34,7 @@
 #define DFU_SUFFIX_LENGTH 16
 #define LMDFU_PREFIX_LENGTH 8
 #define PROGRESS_BAR_WIDTH 25
+#define MAX_STDIN_SIZE 65536
 
 static const unsigned long crc32_table[] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
@@ -170,28 +171,34 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 
 	free(file->firmware);
 
-	f = open(file->name, O_RDONLY | O_BINARY);
-	if (f < 0)
-		err(EX_IOERR, "Could not open file %s for reading", file->name);
+	if (!strcmp(file->name, "-")) {
+		file->firmware = dfu_malloc(MAX_STDIN_SIZE);
+		file->size.total = fread(file->firmware, 1, MAX_STDIN_SIZE, stdin);
+		check_suffix = 0;
+		if (verbose)
+			printf("Read %i bytes from stdin\n", file->size.total);
+	} else {
+		f = open(file->name, O_RDONLY | O_BINARY);
+		if (f < 0)
+			err(EX_IOERR, "Could not open file %s for reading", file->name);
 
-	offset = lseek(f, 0, SEEK_END);
+		offset = lseek(f, 0, SEEK_END);
 
-	if ((int)offset < 0 || (int)offset != offset)
-		err(EX_IOERR, "File size is too big");
+		if ((int)offset < 0 || (int)offset != offset)
+			err(EX_IOERR, "File size is too big");
 
-	if (lseek(f, 0, SEEK_SET) != 0)
-		err(EX_IOERR, "Could not seek to beginning");
+		if (lseek(f, 0, SEEK_SET) != 0)
+			err(EX_IOERR, "Could not seek to beginning");
 
-	file->size.total = offset;
+		file->size.total = offset;
+		file->firmware = dfu_malloc(file->size.total);
 
-	file->firmware = dfu_malloc(file->size.total);
-
-	if (read(f, file->firmware, file->size.total) != file->size.total) {
-		err(EX_IOERR, "Could not read %d bytes from %s",
-		    file->size.total, file->name);
+		if (read(f, file->firmware, file->size.total) != file->size.total) {
+			err(EX_IOERR, "Could not read %d bytes from %s",
+			    file->size.total, file->name);
+		}
+		close(f);
 	}
-
-	close(f);
 
 	if (check_suffix) {
 		uint32_t crc = 0xffffffff;
