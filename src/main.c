@@ -193,7 +193,6 @@ static void help(void)
 		"  -Z --upload-size <bytes>\tSpecify the expected upload size in bytes\n"
 		"  -D --download <file>\t\tWrite firmware from <file> into device\n"
 		"  -R --reset\t\t\tIssue USB Reset signalling once we're finished\n"
-		"  -I --ignore-suffix\t\tDownload <file> even if suffix doesn't match\n"
 		"  -s --dfuse-address <address>\tST DfuSe mode, specify target address for\n"
 		"\t\t\t\traw file download or upload. Not applicable for\n"
 		"\t\t\t\tDfuSe file (.dfu) downloads\n"
@@ -231,8 +230,7 @@ static struct option opts[] = {
 	{ "upload-size", 1, 0, 'Z' },
 	{ "download", 1, 0, 'D' },
 	{ "reset", 0, 0, 'R' },
-	{ "dfuse-address", 1, 0, 's' },
-	{ "ignore-suffix", 0, 0, 'I' }
+	{ "dfuse-address", 1, 0, 's' }
 };
 
 int main(int argc, char **argv)
@@ -261,7 +259,7 @@ int main(int argc, char **argv)
 
 	while (1) {
 		int c, option_index = 0;
-		c = getopt_long(argc, argv, "hVvleIE:d:p:c:i:a:S:t:U:D:Rs:Z:", opts,
+		c = getopt_long(argc, argv, "hVvleE:d:p:c:i:a:S:t:U:D:Rs:Z:", opts,
 				&option_index);
 		if (c == -1)
 			break;
@@ -336,9 +334,6 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			dfuse_options = optarg;
-			dfu_has_suffix = 0;
-			break;
-		case 'I':
 			dfu_has_suffix = 0;
 			break;
 		default:
