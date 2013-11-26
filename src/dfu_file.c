@@ -33,6 +33,7 @@
 #define DFU_SUFFIX_LENGTH 16
 #define LMDFU_PREFIX_LENGTH 8
 #define PROGRESS_BAR_WIDTH 25
+#define MAX_STDIN_SIZE 65536
 
 static const unsigned long crc32_table[] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
@@ -149,27 +150,12 @@ uint32_t dfu_file_write_crc(int f, uint32_t crc, const void *buf, int size)
 	return (crc);
 }
 
-void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
+void dfu_load_file(struct dfu_file *file, enum suffix_req check_suffix, int check_prefix)
 {
 	off_t offset;
 	int f;
 	int i;
 
-	free(file->firmware);
-
-	f = open(file->name, O_RDONLY | O_BINARY);
-	if (f < 0)
-		err(EX_IOERR, "Could not open file %s for reading", file->name);
-
-	offset = lseek(f, 0, SEEK_END);
-
-	if ((int)offset < 0 || (int)offset != offset)
-		err(EX_IOERR, "File size is too big");
-
-	if (lseek(f, 0, SEEK_SET) != 0)
-		err(EX_IOERR, "Could not seek to beginning");
-
-	file->size.total = offset;
 	file->size.prefix = 0;
 	file->size.suffix = 0;
 
@@ -184,19 +170,45 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 
 	file->firmware = (uint8_t*)dfu_malloc(file->size.total);
 
-	if (read(f, file->firmware, file->size.total) != file->size.total) {
-		err(EX_IOERR, "Could not read %d bytes from %s",
-		    file->size.total, file->name);
+	if (!strcmp(file->name, "-")) {
+		file->firmware = dfu_malloc(MAX_STDIN_SIZE);
+		file->size.total = fread(file->firmware, 1, MAX_STDIN_SIZE, stdin);
+		check_suffix = MAYBE_SUFFIX;
+		if (verbose)
+			printf("Read %i bytes from stdin\n", file->size.total);
+	} else {
+		f = open(file->name, O_RDONLY | O_BINARY);
+		if (f < 0)
+			err(EX_IOERR, "Could not open file %s for reading", file->name);
+
+		offset = lseek(f, 0, SEEK_END);
+
+		if ((int)offset < 0 || (int)offset != offset)
+			err(EX_IOERR, "File size is too big");
+
+		if (lseek(f, 0, SEEK_SET) != 0)
+			err(EX_IOERR, "Could not seek to beginning");
+
+		file->size.total = offset;
+		file->firmware = dfu_malloc(file->size.total);
+
+		if (read(f, file->firmware, file->size.total) != file->size.total) {
+			err(EX_IOERR, "Could not read %d bytes from %s",
+			    file->size.total, file->name);
+		}
+		close(f);
 	}
 
-	close(f);
-
-	if (check_suffix) {
+	if (check_suffix == NEEDS_SUFFIX || check_suffix == MAYBE_SUFFIX) {
 		uint32_t crc = 0xffffffff;
 		const uint8_t *dfusuffix;
+		int missing_suffix = 0;
 
-		if (file->size.total < DFU_SUFFIX_LENGTH)
-			errx(EX_IOERR, "File too short for DFU suffix");
+		if (file->size.total < DFU_SUFFIX_LENGTH) {
+			warnx("File too short for DFU suffix");
+			missing_suffix = 1;
+			goto checked;
+		}
 
 		dfusuffix = file->firmware + file->size.total -
 		    DFU_SUFFIX_LENGTH;
@@ -206,16 +218,25 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 
 		if (dfusuffix[10] != 'D' ||
 		    dfusuffix[9]  != 'F' ||
-		    dfusuffix[8]  != 'U')
-			errx(EX_IOERR, "Invalid DFU suffix signature");
+		    dfusuffix[8]  != 'U') {
+			warnx("Invalid DFU suffix signature");
+			missing_suffix = 1;
+			goto checked;
+		}
 
 		file->dwCRC = (dfusuffix[15] << 24) +
 		    (dfusuffix[14] << 16) +
 		    (dfusuffix[13] << 8) +
 		    dfusuffix[12];
 
-		if (file->dwCRC != crc)
-			errx(EX_IOERR, "DFU suffix CRC does not match");
+		if (file->dwCRC != crc) {
+			warnx("DFU suffix CRC does not match");
+			missing_suffix = 1;
+			goto checked;
+		}
+
+		/* At this point we believe we have a DFU suffix
+		   so we require further checks to succeed */
 
 		file->bcdDFU = (dfusuffix[7] << 8) + dfusuffix[6];
 
@@ -237,6 +258,15 @@ void dfu_load_file(struct dfu_file *file, int check_suffix, int check_prefix)
 		file->idVendor	= (dfusuffix[5] << 8) + dfusuffix[4];
 		file->idProduct = (dfusuffix[3] << 8) + dfusuffix[2];
 		file->bcdDevice = (dfusuffix[1] << 8) + dfusuffix[0];
+
+checked:
+		if (missing_suffix) {
+			if (check_suffix == NEEDS_SUFFIX)
+				errx(EX_IOERR, "Valid DFU suffix needed");
+			else
+				warnx("A valid DFU suffix will be required in "
+				      "a future dfu-util release!!!");
+		}
 	}
 
 	if (check_prefix) {
