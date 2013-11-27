@@ -81,7 +81,8 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <PostBuildEvent>
-      <Command>copy "$(SolutionDir)..\$(Platform)\$(Configuration)\dll\libusb-1.0.dll"  "$(SolutionDir)..\$(Platform)\$(ProjectName)\$(Configuration)\"</Command>
+      <Command>
+      </Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -111,11 +112,6 @@
     </ProjectReference>
     <ProjectReference Include="..\..\libusbx\msvc\libusb_dll_2010.vcxproj">
       <Project>{349ee8fa-7d25-4909-aaf5-ff3fade72187}</Project>
-      <Private>true</Private>
-      <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
-      <CopyLocalSatelliteAssemblies>true</CopyLocalSatelliteAssemblies>
-      <LinkLibraryDependencies>true</LinkLibraryDependencies>
-      <UseLibraryDependencyInputs>false</UseLibraryDependencyInputs>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
